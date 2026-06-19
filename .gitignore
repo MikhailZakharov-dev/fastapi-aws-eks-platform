@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+CLAUDE.md
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+
+# Env / secrets — никогда не коммитим (см. _reference: секретов в git нет)
+.env

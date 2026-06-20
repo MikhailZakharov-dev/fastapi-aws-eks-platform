@@ -6,6 +6,13 @@ CLAUDE.md
 # Tooling caches
 .ruff_cache/
 .pytest_cache/
+AGENTS.md
 
 # Env / secrets — никогда не коммитим (см. _reference: секретов в git нет)
 .env
+
+## Terraform — стейт и кэш НИКОГДА в git (стейт = вторая истина + секреты внутри)
+.terraform/
+*.tfstate
+*.tfstate.*
+# .terraform.lock.hcl коммитим (пин провайдеров) — его НЕ игнорим

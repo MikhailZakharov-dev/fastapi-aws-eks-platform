@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: talk-booking
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: talk-booking
+  template:
+    metadata:
+      labels:
+        app: talk-booking
+    spec:
+      containers:
+        - name: app
+          image: 434702089320.dkr.ecr.eu-central-1.amazonaws.com/talk-booking:dev
+          ports:
+            - containerPort: 8000

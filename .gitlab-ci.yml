@@ -1,0 +1,43 @@
+# CI: lint -> test -> build+push образа по SHA в ECR (тема 14)
+# auth в ECR: masked CI-vars (учебный выбор; прод-канон OIDC — см. docs/adr).
+
+stages:
+  - lint
+  - test
+  - build
+
+variables:
+  # ECR_REGISTRY и AWS_REGION заданы в Settings -> CI/CD -> Variables (не в git).
+  IMAGE: "$ECR_REGISTRY/talk-booking"
+
+lint:
+  stage: lint
+  image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+  script:
+    - uv sync --frozen            # ставит dev-группу (ruff) строго по uv.lock
+    - uv run ruff check .         # линт упал => exit!=0 => джоба красная (тема 13)
+
+test:
+  stage: test
+  image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+  script:
+    - echo "заглушка: pytest+тесты придут отдельно (тема 05 read). Стадия есть, грин честный"
+
+build:
+  stage: build
+  image: docker:27               # CLI-контейнер (закрепи актуальный тег с Docker Hub)
+  services:
+    - docker:27-dind             # ДЕМОН sidecar'ом (нужен privileged; SaaS-раннер даёт)
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: "/certs" # TLS между CLI и демоном; связка версионно капризна
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'   # образ пушим ТОЛЬКО с main
+  before_script:
+    - apk add --no-cache aws-cli
+    # долгоживущий ключ ($AWS_ACCESS_KEY_ID/$AWS_SECRET_ACCESS_KEY) подписывает
+    # запрос к ECR -> ECR отдаёт КОРОТКИЙ токен -> им docker login:
+    - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+  script:
+    - docker build -t "$IMAGE:$CI_COMMIT_SHA" .    # слои печёт демон-sidecar
+    - docker push "$IMAGE:$CI_COMMIT_SHA"          # тег = хэш коммита => provenance

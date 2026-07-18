@@ -31,8 +31,12 @@ build:
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'  
   before_script:
-    - apk add --no-cache aws-cli
-    - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+    # aws-cli из Alpine-пакета ломается (expat/pyexpat symbol mismatch) -> берём
+    # его готовым контейнером через наш dind-демон. Долгоживущий ключ
+    # ($AWS_ACCESS_KEY_ID/$SECRET) подписывает запрос -> ECR отдаёт КОРОТКИЙ токен.
+    # Две строки, не пайп: падение aws не маскируется exit-кодом login (тема 13).
+    - ECR_TOKEN=$(docker run --rm -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY amazon/aws-cli:2 ecr get-login-password --region "$AWS_REGION")
+    - echo "$ECR_TOKEN" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
   script:
     - docker build -t "$IMAGE:$CI_COMMIT_SHA" .    
     - docker push "$IMAGE:$CI_COMMIT_SHA"        

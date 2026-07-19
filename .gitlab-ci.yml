@@ -1,0 +1,38 @@
+stages:
+  - lint
+  - test
+  - build
+
+variables:
+  IMAGE: "$ECR_REGISTRY/talk-booking"
+
+lint:
+  stage: lint
+  image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+  script:
+    - uv sync --frozen
+    - uv run ruff check .
+
+test:
+  stage: test
+  image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+  script:
+    - echo "pytest"
+
+build:
+  stage: build
+  image: docker:27
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: "/certs"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  before_script:
+    # aws-cli is run from its official image (the Alpine package is broken on this base).
+    - ECR_TOKEN=$(docker run --rm -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY amazon/aws-cli:2.36.2 ecr get-login-password --region "$AWS_REGION")
+    - echo "$ECR_TOKEN" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+  script:
+    - docker build -t "$IMAGE:$CI_COMMIT_SHA" .
+    - docker push "$IMAGE:$CI_COMMIT_SHA"

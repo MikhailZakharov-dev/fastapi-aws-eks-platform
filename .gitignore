@@ -16,3 +16,4 @@ AGENTS.md
 *.tfstate
 *.tfstate.*
 # .terraform.lock.hcl коммитим (пин провайдеров) — его НЕ игнорим
+ci-ecr-policy.json

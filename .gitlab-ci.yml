@@ -2,6 +2,7 @@ stages:
   - lint
   - test
   - build
+  - deploy
 
 variables:
   IMAGE: "$ECR_REGISTRY/talk-booking"
@@ -36,3 +37,29 @@ build:
   script:
     - docker build -t "$IMAGE:$CI_COMMIT_SHA" .
     - docker push "$IMAGE:$CI_COMMIT_SHA"
+
+# Деплой инициируется коммитом в gitops-репозиторий: у CI нет доступа к кластеру,
+# кластер сам забирает желаемое состояние (см. docs/adr/17-ci-commits-to-gitops.md).
+deploy-dev:
+  stage: deploy
+  image: alpine:3.20
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  variables:
+    GIT_STRATEGY: none
+    GITOPS_HOST: "gitlab.com/beaviz0405/talk-booking-gitops.git"
+    VALUES_FILE: "charts/talk-booking/values-dev.yaml"
+  script:
+    - apk add --no-cache git
+    - git clone "https://oauth2:${GITOPS_TOKEN}@${GITOPS_HOST}" gitops
+    - cd gitops
+    - git config user.email "ci@talk-booking"
+    - git config user.name "talk-booking CI"
+    - sed -i "s|^  tag: .*|  tag: \"$CI_COMMIT_SHA\"|" "$VALUES_FILE"
+    # sed возвращает 0, даже если ничего не заменил: без проверки джоба была бы
+    # зелёной, а тег незабампленным — деплой молча не состоялся бы.
+    - grep -q "tag: \"$CI_COMMIT_SHA\"" "$VALUES_FILE"
+    - if git diff --quiet; then echo "already at $CI_COMMIT_SHA"; exit 0; fi
+    - git commit -am "chore(dev): bump image.tag to $CI_COMMIT_SHA ($CI_PIPELINE_URL)"
+    # между clone и push мог приехать чужой коммит — ребейз и повтор
+    - for i in 1 2 3; do git pull --rebase && git push && exit 0; sleep 5; done; exit 1

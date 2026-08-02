@@ -1,33 +1,38 @@
 # infra/ — Terraform
 
-Foundation для talk-booking: remote state (S3), VPC, EKS, ECR.
+Foundation для talk-booking: remote state (S3), VPC, EKS, ECR, RDS, bootstrap ArgoCD.
 
 ## Слои: персистентное vs эфемерное
 
 | Слой | Ресурсы | Жизнь |
 | --- | --- | --- |
 | **Персистентное** | S3 state bucket, ECR | живёт всегда (дёшево); защищено `prevent_destroy` |
-| **Эфемерное** | VPC, NAT, EKS | apply в начале сессии → destroy в конце (дорого) |
+| **Эфемерное** | VPC, NAT, EKS, ArgoCD, RDS | apply в начале сессии → destroy в конце (дорого) |
 
 ## Ритуал сессии
 
 ```bash
-# поднять эфемерный стек (~15 мин из-за EKS control plane)
-terraform apply
-
-# доступ к кластеру (новый кластер = новый endpoint/CA → каждую сессию заново)
-aws eks update-kubeconfig --name talk-booking --region eu-central-1
-
+make up          # поднять стенд (~20 мин) + обновить kubeconfig
 # ... работа ...
-
-# снести эфемерное; персистентное (bucket + ECR) остаётся
-terraform destroy -target=module.eks -target=module.vpc
+make down        # снести эфемерное; bucket и ECR остаются
+make status      # проверить, что снеслось
 ```
 
-`prevent_destroy` на bucket/ECR не даст случайно снести персистентное → teardown
-делается targeted, а не голым `terraform destroy`.
+Снос идёт **списком целей**, а не голым `terraform destroy`: последний упрётся в
+`prevent_destroy` на бакете состояния и ECR и не выполнится вовсе. Актуальный список
+эфемерных ресурсов живёт в `Makefile` — добавляя новый ресурс в этот слой, дополняй
+переменную `EPHEMERAL`, иначе он переживёт `make down` и продолжит стоить денег.
+
+`make snapshots` показывает финальные снимки RDS, оставшиеся от прошлых сессий: при
+`skip_final_snapshot = false` каждый снос оставляет по снимку, и они накапливаются.
 
 ## Cost
 
-EKS CP $0.10/ч + 2× t3.small + NAT ≈ **$0.3–0.4 / сессия**.
-Персистентное (S3 state, ECR-образы) — копейки/мес, не сносим.
+EKS CP $0.10/ч + 2× t3.small + NAT + RDS micro ≈ **$0.4–0.5 / сессия**.
+Персистентное (S3 state, ECR-образы, снимки) — копейки/мес.
+
+## Решения
+
+Обоснования вынесены в ADR: [CI→AWS auth](../docs/adr/14-ci-auth-masked-vars.md) ·
+[шифрование Secrets в EKS](../docs/adr/17-eks-secrets-encryption-off.md) ·
+[комплект защит RDS](../docs/adr/19-rds-safety-flags.md).

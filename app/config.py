@@ -11,5 +11,12 @@ class Settings(BaseSettings):
     # локально "unknown", чтобы /health всегда отвечал.
     commit_sha: str = "unknown"
 
+    # Подключение к БД. Хост и пароль приезжают из k8s Secret, остальное — из values.
+    db_host: str = "localhost"
+    db_port: int = 5432
+    db_user: str = "app"
+    db_password: str = ""
+    db_name: str = "talkbooking"
+
 
 settings = Settings()

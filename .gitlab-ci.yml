@@ -16,7 +16,10 @@ lint:
 
 secrets:
   stage: lint
-  image: zricethezav/gitleaks:v8.30.1
+  image:
+    name: zricethezav/gitleaks:v8.30.1
+    # У образа ENTRYPOINT — сам бинарь, а раннер запускает script через шелл.
+    entrypoint: [""]
   variables:
     # Полная история: при shallow-клоне секрет из старого коммита не нашёлся бы.
     GIT_DEPTH: 0

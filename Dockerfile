@@ -8,9 +8,8 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
-# --locked, а не --frozen: --frozen ставит ровно то, что в uv.lock, не сверяя
-# его с pyproject.toml, и собирает образ без забытых зависимостей молча.
-# --locked падает, если лок разошёлся с pyproject.
+# --locked падает при расхождении lock и pyproject; --frozen собрал бы образ
+# без забытых зависимостей молча.
 RUN uv sync --locked --no-dev --no-install-project
 
 COPY app ./app

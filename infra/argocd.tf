@@ -1,6 +1,5 @@
-# Токен добывается лениво, в момент подключения. Data-источник читался бы
-# в начале apply — до создания кластера и задолго до того, как helm им
-# воспользуется, и к тому моменту успевал протухнуть.
+# Токен добывается лениво: data-источник читался бы в начале apply и протухал
+# до того, как helm им воспользуется.
 provider "helm" {
   kubernetes {
     host                   = module.eks.cluster_endpoint
@@ -14,8 +13,7 @@ provider "helm" {
   }
 }
 
-# Ставит CRD Application + поды ArgoCD. argocd-server остаётся ClusterIP:
-# наружу не торчит, доступ через port-forward.
+# argocd-server остаётся ClusterIP: наружу не торчит, доступ через port-forward.
 resource "helm_release" "argocd" {
   name             = "argocd"
   repository       = "https://argoproj.github.io/argo-helm"
@@ -25,8 +23,7 @@ resource "helm_release" "argocd" {
   create_namespace = true
 }
 
-# Единственная Application, которую создаёт Terraform. Дальше состав кластера
-# ведётся коммитами в apps/ этого же репозитория.
+# Единственная Application от Terraform; дальше состав кластера ведётся коммитами.
 resource "helm_release" "root_app" {
   name       = "root-app"
   repository = "https://argoproj.github.io/argo-helm"
@@ -54,8 +51,7 @@ resource "helm_release" "root_app" {
         syncPolicy = {
           automated = {
             selfHeal = true
-            # prune выключен намеренно: на root ошибка снесла бы приложение
-            # целиком вместе с его нагрузкой.
+            # На root prune снёс бы приложение вместе с нагрузкой.
             prune = false
           }
         }

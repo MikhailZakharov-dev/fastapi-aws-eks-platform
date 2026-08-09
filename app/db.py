@@ -2,8 +2,7 @@ from sqlalchemy import URL, create_engine, text
 
 from app.config import settings
 
-# URL.create экранирует пароль сам. Сгенерированный RDS пароль может содержать
-# @ / : ? — при склейке строки подключения вручную такой пароль ломает адрес.
+# URL.create экранирует пароль: сгенерированный RDS может содержать @ / : ?
 DATABASE_URL = URL.create(
     "postgresql+psycopg",
     username=settings.db_user,
@@ -13,8 +12,7 @@ DATABASE_URL = URL.create(
     database=settings.db_name,
 )
 
-# pool_pre_ping проверяет соединение перед выдачей из пула: сервер мог закрыть
-# его за время простоя, и без проверки это всплывёт как ошибка первого запроса.
+# pool_pre_ping отсеивает соединения, закрытые сервером за время простоя.
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 

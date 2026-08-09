@@ -19,9 +19,7 @@ resource "aws_vpc_security_group_ingress_rule" "rds_from_nodes" {
   ip_protocol                  = "tcp"
 }
 
-# Уникальный суффикс имени финального снимка. Живёт в стейте и уничтожается
-# вместе со стеком, поэтому каждый цикл apply/destroy получает своё имя,
-# а внутри цикла значение стабильно и не шумит в plan.
+# Уникальный суффикс имени финального снимка: живёт и умирает вместе со стендом.
 resource "random_id" "snapshot_suffix" {
   byte_length = 4
 }
@@ -38,8 +36,7 @@ resource "aws_db_instance" "app" {
   db_name  = "talkbooking"
   username = "app"
 
-  # Пароль генерит и хранит сам RDS в Secrets Manager. Обычный `password`
-  # попал бы в state-файл открытым текстом.
+  # Пароль ведёт сам RDS в Secrets Manager; обычный `password` попал бы в state.
   manage_master_user_password = true
 
   db_subnet_group_name   = aws_db_subnet_group.app.name

@@ -11,8 +11,18 @@ lint:
   stage: lint
   image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
   script:
-    - uv sync --frozen
+    - uv sync --locked
     - uv run ruff check .
+
+secrets:
+  stage: lint
+  image: zricethezav/gitleaks:v8.30.1
+  variables:
+    # Полная история: при shallow-клоне секрет из старого коммита не нашёлся бы.
+    GIT_DEPTH: 0
+  script:
+    # --redact: без него найденное значение утекло бы ещё и в лог пайплайна.
+    - gitleaks git --verbose --redact --no-banner .
 
 test:
   stage: test

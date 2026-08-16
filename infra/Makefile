@@ -19,14 +19,27 @@ EPHEMERAL := \
 	-target=module.eks \
 	-target=module.vpc
 
-.PHONY: up down plan kubeconfig status snapshots cost
+.PHONY: up down plan kubeconfig status snapshots cost values
 
 up: ## поднять стенд (~20 мин) и обновить kubeconfig
 	terraform apply
 	$(MAKE) kubeconfig
 
 down: ## снести эфемерный слой; бакет состояния и ECR остаются
+	@echo "== удаляю Ingress, чтобы контроллер успел снести ALB =="
+	@kubectl delete ingress --all --all-namespaces --ignore-not-found --timeout=3m 2>/dev/null \
+	  || echo "(кластера нет или Ingress отсутствует — пропускаю)"
+	@echo "== жду, пока балансировщик исчезнет =="
+	@for i in $$(seq 1 20); do \
+	  COUNT=$$(aws elbv2 describe-load-balancers --region $(REGION) \
+	    --query 'length(LoadBalancers)' --output text 2>/dev/null || echo 0); \
+	  [ "$$COUNT" = "0" ] && break; \
+	  sleep 10; \
+	done
 	terraform destroy $(EPHEMERAL)
+
+values: ## перенести ARN секрета и адрес базы в values-dev gitops-репозитория
+	@./scripts/sync-values.sh
 
 plan: ## посчитать план, ничего не меняя
 	terraform plan

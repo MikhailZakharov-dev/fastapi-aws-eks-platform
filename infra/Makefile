@@ -19,7 +19,7 @@ EPHEMERAL := \
 	-target=module.eks \
 	-target=module.vpc
 
-.PHONY: up down plan kubeconfig status snapshots cost values
+.PHONY: up down orphans plan kubeconfig status snapshots cost values
 
 up: ## поднять стенд (~20 мин) и обновить kubeconfig
 	terraform apply
@@ -36,7 +36,49 @@ down: ## снести эфемерный слой; бакет состояния
 	  [ "$$COUNT" = "0" ] && break; \
 	  sleep 10; \
 	done
+	@# Балансировщик держит сетевые интерфейсы в подсетях, и terraform не сможет
+	@# удалить VPC, пока они там. Контроллер к этому моменту уже мог уехать вместе
+	@# с кластером, и тогда снимать финализатор с Ingress будет некому — поэтому
+	@# останавливаемся здесь, а не бьёмся об ошибку зависимостей.
+	@COUNT=$$(aws elbv2 describe-load-balancers --region $(REGION) \
+	  --query 'length(LoadBalancers)' --output text 2>/dev/null || echo 0); \
+	if [ "$$COUNT" != "0" ]; then \
+	  echo ""; \
+	  echo "ОСТАНОВКА: балансировщик всё ещё жив, снос VPC упрётся в его интерфейсы."; \
+	  echo "Разберись с ним и повтори: make orphans"; \
+	  exit 1; \
+	fi
 	terraform destroy $(EPHEMERAL)
+
+orphans: ## удалить осиротевшие ALB и target groups, когда контроллера уже нет
+	@echo "== балансировщики =="
+	@for ARN in $$(aws elbv2 describe-load-balancers --region $(REGION) \
+	  --query 'LoadBalancers[].LoadBalancerArn' --output text); do \
+	  echo "удаляю $$ARN"; \
+	  aws elbv2 delete-load-balancer --region $(REGION) --load-balancer-arn "$$ARN"; \
+	done
+	@echo "== целевые группы =="
+	@for ARN in $$(aws elbv2 describe-target-groups --region $(REGION) \
+	  --query 'TargetGroups[].TargetGroupArn' --output text); do \
+	  echo "удаляю $$ARN"; \
+	  aws elbv2 delete-target-group --region $(REGION) --target-group-arn "$$ARN" || true; \
+	done
+	@echo "== снимаю финализаторы с Ingress (контроллера нет, снять их больше некому) =="
+	@kubectl get ingress --all-namespaces -o jsonpath='{range .items[*]}{.metadata.namespace} {.metadata.name}{"\n"}{end}' 2>/dev/null \
+	  | while read NS NAME; do \
+	      [ -z "$$NAME" ] && continue; \
+	      kubectl -n $$NS patch ingress $$NAME --type=merge -p '{"metadata":{"finalizers":null}}'; \
+	    done || echo "(кластера нет — пропускаю)"
+	@# Контроллер заводит собственные security groups, которых нет в state Terraform.
+	@# Они переживают destroy и держат VPC — узнаются по тегу его авторства.
+	@echo "== security groups, созданные контроллером =="
+	@for SG in $$(aws ec2 describe-security-groups --region $(REGION) \
+	  --filters Name=tag:elbv2.k8s.aws/cluster,Values=$(CLUSTER) \
+	  --query 'SecurityGroups[].GroupId' --output text 2>/dev/null); do \
+	  echo "удаляю $$SG"; \
+	  aws ec2 delete-security-group --region $(REGION) --group-id "$$SG" || true; \
+	done
+	@echo "готово, теперь можно make down"
 
 values: ## перенести ARN секрета и адрес базы в values-dev gitops-репозитория
 	@./scripts/sync-values.sh

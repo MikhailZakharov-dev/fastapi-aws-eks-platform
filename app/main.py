@@ -1,7 +1,8 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response, status
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -23,6 +24,17 @@ app = FastAPI(title=settings.app_name, lifespan=lifespan)
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     """Цель для probe; эхо-ит commit SHA текущей сборки."""
+    return HealthResponse(status="ok", commit_sha=settings.commit_sha)
+
+
+@app.get("/ready", response_model=HealthResponse)
+def ready(response: Response) -> HealthResponse:
+    """Цель readiness-пробы: пускаем трафик, только если база отвечает."""
+    try:
+        check_connection()
+    except SQLAlchemyError:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return HealthResponse(status="db unavailable", commit_sha=settings.commit_sha)
     return HealthResponse(status="ok", commit_sha=settings.commit_sha)
 
 

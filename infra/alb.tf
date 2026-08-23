@@ -72,4 +72,14 @@ resource "helm_release" "alb_controller" {
     name  = "vpcId"
     value = module.vpc.vpc_id
   }
+
+  # Вебхук перехватывает Service типа LoadBalancer, чтобы контроллер стал для них
+  # обработчиком по умолчанию. Мы такие не создаём — балансировщик заводится через
+  # Ingress. При этом failurePolicy у вебхука Fail: пока контроллер недоступен,
+  # Service не создать ни в одном namespace. На подъёме стенда это ломало установку
+  # ESO — правило появлялось раньше, чем поды контроллера успевали стать Ready.
+  set {
+    name  = "enableServiceMutatorWebhook"
+    value = "false"
+  }
 }

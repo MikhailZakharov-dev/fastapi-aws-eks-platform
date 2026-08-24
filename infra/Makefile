@@ -26,6 +26,16 @@ up: ## поднять стенд (~20 мин) и обновить kubeconfig
 	$(MAKE) kubeconfig
 
 down: ## снести эфемерный слой; бакет состояния и ECR остаются
+	@# ArgoCD с selfHeal возвращает удалённый Ingress за пару минут, контроллер
+	@# заводит НОВЫЙ балансировщик, и тот сиротеет вместе с кластером. Интервал
+	@# сверки почти равен окну ожидания ниже, поэтому это гонка: снимаем автоматику
+	@# со всех Application до того, как что-то удалять.
+	@echo "== снимаю автосинк с Application, иначе ArgoCD вернёт Ingress обратно =="
+	@kubectl -n argocd get applications -o name 2>/dev/null \
+	  | while read APP; do \
+	      kubectl -n argocd patch $$APP --type=merge \
+	        -p '{"spec":{"syncPolicy":{"automated":null}}}'; \
+	    done || echo "(кластера нет или Application отсутствуют — пропускаю)"
 	@echo "== удаляю Ingress, чтобы контроллер успел снести ALB =="
 	@kubectl delete ingress --all --all-namespaces --ignore-not-found --timeout=3m 2>/dev/null \
 	  || echo "(кластера нет или Ingress отсутствует — пропускаю)"

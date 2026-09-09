@@ -3,6 +3,7 @@ stages:
   - test
   - build
   - deploy
+  - promote
 
 variables:
   IMAGE: "$ECR_REGISTRY/talk-booking"
@@ -89,3 +90,49 @@ deploy-dev:
         sleep 5
       done
       exit 1
+
+promote-prod:
+  stage: promote
+  image: alpine:3.20
+  # Продвижение — человеческое действие: джоба не стартует сама.
+  # Ловушка: у ручных джоб allow_failure по умолчанию true, поэтому упавший
+  # promote НЕ красит пайплайн. Смотреть надо саму джобу, а не значок сверху.
+  when: manual
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  variables:
+    GIT_STRATEGY: none
+    GITOPS_HOST: "gitlab.com/beaviz0405/talk-booking-gitops.git"
+    VALUES_FILE: "charts/talk-booking/values-prod.yaml"
+  script:
+    - |
+      set -euo pipefail
+
+      apk add --no-cache git
+      git clone "https://oauth2:${GITOPS_TOKEN}@${GITOPS_HOST}" gitops
+      cd gitops
+      git config user.email "ci@talk-booking"
+      git config user.name "talk-booking CI"
+
+      BRANCH="promote-${CI_COMMIT_SHORT_SHA}"
+      git checkout -b "$BRANCH"
+
+      # Продвигаем ИМЕННО тот SHA, который эта же сборка отправила в dev,
+      # а не HEAD gitops и не «последний собранный».
+      sed -i "s|^  tag: .*|  tag: \"$CI_COMMIT_SHA\"|" "$VALUES_FILE"
+      # sed возвращает 0, даже когда ничего не заменил
+      grep -q "tag: \"$CI_COMMIT_SHA\"" "$VALUES_FILE"
+
+      if git diff --quiet; then
+        echo "prod уже на $CI_COMMIT_SHA — продвигать нечего"
+        exit 0
+      fi
+
+      git commit -am "promote(prod): $CI_COMMIT_SHORT_SHA"
+
+      # MR открывается push-опциями: отдельный токен для API не нужен.
+      git push -o merge_request.create \
+               -o merge_request.target=main \
+               -o merge_request.title="promote(prod): $CI_COMMIT_SHORT_SHA" \
+               -o merge_request.remove_source_branch \
+               origin "$BRANCH"

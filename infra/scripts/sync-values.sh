@@ -6,11 +6,13 @@ set -euo pipefail
 INFRA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GITOPS_DIR="${GITOPS_DIR:-$(cd "$INFRA_DIR/../.." && pwd)/talk-booking-gitops}"
 
-SECRETS_VALUES="$GITOPS_DIR/charts/secrets/values-dev.yaml"
-APP_VALUES="$GITOPS_DIR/charts/talk-booking/values-dev.yaml"
+# База одна на оба окружения, поэтому ARN и хост у dev и prod совпадают.
+ENVS="dev prod"
 
-for f in "$SECRETS_VALUES" "$APP_VALUES"; do
-  [ -f "$f" ] || { echo "нет файла: $f"; echo "задай GITOPS_DIR, если репозиторий лежит в другом месте"; exit 1; }
+for ENV in $ENVS; do
+  for f in "$GITOPS_DIR/charts/secrets/values-$ENV.yaml" "$GITOPS_DIR/charts/talk-booking/values-$ENV.yaml"; do
+    [ -f "$f" ] || { echo "нет файла: $f"; echo "задай GITOPS_DIR, если репозиторий лежит в другом месте"; exit 1; }
+  done
 done
 
 cd "$INFRA_DIR"
@@ -37,11 +39,13 @@ replace() {
   }
 }
 
-replace "$SECRETS_VALUES" "secretArn" "$ARN"
-replace "$APP_VALUES" "host" "$HOST"
+for ENV in $ENVS; do
+  replace "$GITOPS_DIR/charts/secrets/values-$ENV.yaml" "secretArn" "$ARN"
+  replace "$GITOPS_DIR/charts/talk-booking/values-$ENV.yaml" "host" "$HOST"
+done
 
-echo "secretArn → $ARN"
-echo "host      → $HOST"
+echo "secretArn → $ARN   (dev, prod)"
+echo "host      → $HOST   (dev, prod)"
 echo
 cd "$GITOPS_DIR"
 if git diff --quiet; then

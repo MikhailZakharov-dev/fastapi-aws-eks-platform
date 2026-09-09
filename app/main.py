@@ -41,5 +41,5 @@ def ready(response: Response) -> HealthResponse:
 @app.get("/talks", response_model=list[TalkResponse])
 def list_talks() -> list[TalkResponse]:
     with Session(engine) as session:
-        talks = session.scalars(select(Talk)).all()
+        talks = session.scalars(select(Talk).order_by(Talk.tittle)).all()
     return [TalkResponse.model_validate(t) for t in talks]

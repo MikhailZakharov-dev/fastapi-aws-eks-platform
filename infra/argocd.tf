@@ -31,8 +31,10 @@ resource "helm_release" "root_app" {
   version    = "2.0.5"
   namespace  = "argocd"
 
-  # CRD Application должен существовать до записи объекта такого вида.
-  depends_on = [helm_release.argocd]
+  # CRD Application приносит ArgoCD, CRD ServiceMonitor — стек мониторинга.
+  # Создать Application раньше нельзя: чарт приложения не отрендерится, пока
+  # вид ServiceMonitor не зарегистрирован в API.
+  depends_on = [helm_release.argocd, helm_release.kube_prometheus_stack]
 
   values = [yamlencode({
     applications = {

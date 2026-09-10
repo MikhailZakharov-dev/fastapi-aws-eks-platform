@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Response, status
+from prometheus_fastapi_instrumentator import Instrumentator
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -19,6 +20,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+
+# Пробы стучат в /health и /ready каждые 2-10 секунд. Без исключения они составят
+# подавляющее большинство «запросов» и утопят реальный трафик в счётчиках.
+Instrumentator(excluded_handlers=["/health", "/ready", "/metrics"]).instrument(app).expose(app)
 
 
 @app.get("/health", response_model=HealthResponse)

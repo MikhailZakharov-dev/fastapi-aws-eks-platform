@@ -25,4 +25,25 @@ resource "helm_release" "kube_prometheus_stack" {
     name  = "prometheus.prometheusSpec.retention"
     value = "6h"
   }
+
+  # Ёмкость ноды здесь считается НЕ в памяти, а в адресах: у t3.small три ENI
+  # по четыре адреса, то есть около 11 подов на ноду. Памяти при этом свободно
+  # больше 90%. Метрики узлов и состояния кластера для RED-дашборда не нужны —
+  # он строится по метрикам приложения, поэтому освобождаем слоты ими.
+  set {
+    name  = "nodeExporter.enabled"
+    value = "false"
+  }
+
+  set {
+    name  = "kubeStateMetrics.enabled"
+    value = "false"
+  }
+
+  # Хуки генерации сертификатов для вебхука валидации PrometheusRule: два
+  # временных пода на установку. Валидация правил нам не нужна, слоты нужны.
+  set {
+    name  = "prometheusOperator.admissionWebhooks.enabled"
+    value = "false"
+  }
 }

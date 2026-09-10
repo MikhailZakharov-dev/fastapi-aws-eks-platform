@@ -16,4 +16,5 @@ AGENTS.md
 *.tfstate
 *.tfstate.*
 # .terraform.lock.hcl коммитим (пин провайдеров) — его НЕ игнорим
+.playwright-cli
 ci-ecr-policy.json

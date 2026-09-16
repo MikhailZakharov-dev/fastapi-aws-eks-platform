@@ -21,6 +21,15 @@ resource "helm_release" "argocd" {
   version          = "10.2.1"
   namespace        = "argocd"
   create_namespace = true
+
+  # Слоты под поды на t3.small считаются в адресах ENI — их 11 на ноду, и стек
+  # мониторинга упирается именно в них, а не в память. Dex обслуживает внешний
+  # SSO, notifications-controller — рассылки из ArgoCD: ни того, ни другого на
+  # стенде нет, вход локальным admin. Два пода освобождаются даром.
+  values = [yamlencode({
+    dex           = { enabled = false }
+    notifications = { enabled = false }
+  })]
 }
 
 # Единственная Application от Terraform; дальше состав кластера ведётся коммитами.

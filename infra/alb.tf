@@ -52,6 +52,14 @@ resource "helm_release" "alb_controller" {
     value = module.eks.cluster_name
   }
 
+  # Дефолт чарта — две реплики: при потере ноды балансировщиками остаётся кому
+  # управлять. Здесь один эфемерный стенд, а слот пода на t3.small дефицитнее
+  # отказоустойчивости: их 11 на ноду, считаются в адресах ENI.
+  set {
+    name  = "replicaCount"
+    value = "1"
+  }
+
   set {
     name  = "serviceAccount.name"
     value = "aws-load-balancer-controller"

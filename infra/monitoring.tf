@@ -8,6 +8,11 @@ resource "helm_release" "kube_prometheus_stack" {
 
   depends_on = [module.eks]
 
+  # Дефолт провайдера — 300 секунд, и их не хватает. Чарт тянет CRD, оператора,
+  # Prometheus, Alertmanager, Grafana и kube-state-metrics; на t3.small одни только
+  # выкачивание образов съедает больше пяти минут, а wait ждёт готовности всего.
+  timeout = 900
+
   # Постоянного тома нет: метрики живут до пересоздания пода, хранить долго незачем.
   set {
     name  = "prometheus.prometheusSpec.retention"
@@ -32,14 +37,17 @@ resource "helm_release" "kube_prometheus_stack" {
     value = "true"
   }
 
-  # Хуки генерации сертификатов для вебхука валидации PrometheusRule: два
-  # временных пода на установку. Цена выключения — синтаксически битое выражение
-  # в правиле apiserver примет молча; узнаешь об этом не от kubectl, а из логов
-  # оператора или по тому, что правило просто не появилось в Prometheus.
-  set {
-    name  = "prometheusOperator.admissionWebhooks.enabled"
-    value = "false"
-  }
+  # Вебхук валидации PrometheusRule остаётся ВКЛЮЧЁННЫМ, и выключать его нельзя.
+  # admissionWebhooks.enabled=false убирает хук-джобу, которая генерирует секрет
+  # kube-prometheus-stack-admission, но сам оператор всё равно запускается с
+  # --web.enable-tls=true и монтирует этот секрет томом. На чистом кластере секрета
+  # нет, под навсегда застревает в FailedMount, и helm отваливается по таймауту.
+  # На апгрейде это не проявляется: секрет создаётся джобой императивно, helm его
+  # не отслеживает и не удаляет, поэтому он доживает от прошлой установки.
+  # Слотов под поды вебхук не занимает: обе джобы — helm-хуки с
+  # hook-delete-policy: hook-succeeded, то есть исчезают сразу после успеха.
+  # failurePolicy у него Ignore и перехватывает он только prometheusrules —
+  # заблокировать что-то, как вебхук ALB-контроллера, он не может.
 
   # Grafana наружу не торчит: ClusterIP и port-forward, Ingress не заводим —
   # он поднял бы ALB с почасовой оплатой. Пароль остаётся чартовый

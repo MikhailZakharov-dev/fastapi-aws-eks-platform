@@ -19,13 +19,19 @@ EPHEMERAL := \
 	-target=module.eks \
 	-target=module.vpc
 
-.PHONY: up down orphans plan kubeconfig status snapshots cost values
+.PHONY: up down orphans leftovers plan kubeconfig status snapshots cost values
 
 up: ## поднять стенд (~20 мин) и обновить kubeconfig
 	terraform apply
 	$(MAKE) kubeconfig
 
 down: ## снести эфемерный слой; бакет состояния и ECR остаются
+	@# Подтверждение — один раз и ДО первого действия: уже следующий шаг меняет
+	@# кластер. Раньше спрашивал terraform в самом конце, и отказ оставлял стенд
+	@# наполовину разобранным — автосинк снят, Ingress удалён. Повторы сноса ниже
+	@# идут без вопроса: состав тот же и подтверждён здесь.
+	@printf "Снести эфемерный слой стенда? Введи yes: "; read A; \
+	  [ "$$A" = "yes" ] || { echo "отменено"; exit 1; }
 	@# ArgoCD с selfHeal возвращает удалённый Ingress за пару минут, контроллер
 	@# заводит НОВЫЙ балансировщик, и тот сиротеет вместе с кластером. Интервал
 	@# сверки почти равен окну ожидания ниже, поэтому это гонка: снимаем автоматику
@@ -36,6 +42,9 @@ down: ## снести эфемерный слой; бакет состояния
 	      kubectl -n argocd patch $$APP --type=merge \
 	        -p '{"spec":{"syncPolicy":{"automated":null}}}'; \
 	    done || echo "(кластера нет или Application отсутствуют — пропускаю)"
+	@# Финализаторы ExternalSecret снимает только контроллер ESO, а снос его чарта
+	@# убивает контроллер раньше, чем каскад дойдёт до объектов. Подробно — в скрипте.
+	@./scripts/release-externalsecrets.sh
 	@echo "== удаляю Ingress, чтобы контроллер успел снести ALB =="
 	@kubectl delete ingress --all --all-namespaces --ignore-not-found --timeout=3m 2>/dev/null \
 	  || echo "(кластера нет или Ingress отсутствует — пропускаю)"
@@ -58,7 +67,19 @@ down: ## снести эфемерный слой; бакет состояния
 	  echo "Разберись с ним и повтори: make orphans"; \
 	  exit 1; \
 	fi
-	terraform destroy $(EPHEMERAL)
+	@# Повтор — когда сносу помешала сеть или внешний API: в теме 29 destroy
+	@# оборвался на падении DNS посреди работы. Состав тот же, подтверждён выше.
+	@for i in 1 2 3; do \
+	  terraform destroy -auto-approve $(EPHEMERAL) && exit 0; \
+	  echo "== попытка $$i не прошла, повторяю тот же снос через 20 с =="; \
+	  sleep 20; \
+	done; \
+	REGION=$(REGION) ./scripts/leftovers.sh; exit 1
+	@# Код возврата terraform — не доказательство сноса: сверяем факт в AWS.
+	@REGION=$(REGION) ./scripts/leftovers.sh
+
+leftovers: ## что из платного осталось в AWS (пусто = стенд снесён до конца)
+	@REGION=$(REGION) ./scripts/leftovers.sh
 
 orphans: ## удалить осиротевшие ALB и target groups, когда контроллера уже нет
 	@echo "== балансировщики =="

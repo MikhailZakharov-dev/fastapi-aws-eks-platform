@@ -23,6 +23,21 @@ module "eks" {
     metrics-server = {}
   }
 
+  # Аддон слушает 10251, а не 10250 kubelet'а, и модуль этот порт по умолчанию не
+  # открывает. apiserver ходит в под metrics-server через aggregation layer; без
+  # правила пакеты молча режутся на группе нод, apiservice висит в
+  # FailedDiscoveryCheck, а HPA и kubectl top не получают ни одной цифры.
+  node_security_group_additional_rules = {
+    ingress_cluster_metrics_server = {
+      description                   = "Cluster API to metrics-server"
+      protocol                      = "tcp"
+      from_port                     = 10251
+      to_port                       = 10251
+      type                          = "ingress"
+      source_cluster_security_group = true
+    }
+  }
+
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.private_subnets
 

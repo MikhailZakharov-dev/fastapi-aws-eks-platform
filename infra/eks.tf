@@ -17,6 +17,12 @@ module "eks" {
   create_kms_key            = false
   cluster_encryption_config = {}
 
+  # HPA получает цифры только через API metrics.k8s.io, а его отдаёт metrics-server.
+  # Аддон EKS: версию под кластер подбирает AWS, модуль ставит его после групп нод.
+  cluster_addons = {
+    metrics-server = {}
+  }
+
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.private_subnets
 

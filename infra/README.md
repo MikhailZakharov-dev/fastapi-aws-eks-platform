@@ -1,38 +1,56 @@
 # infra/ — Terraform
 
-Foundation для talk-booking: remote state (S3), VPC, EKS, ECR, RDS, bootstrap ArgoCD.
+The foundation of talk-booking: remote state (S3), VPC, EKS, ECR, RDS, and the in-cluster
+platform installed by Terraform — ArgoCD with the root Application, External Secrets
+Operator, the AWS Load Balancer Controller, the monitoring stack.
 
-## Слои: персистентное vs эфемерное
+## Layers: persistent vs ephemeral
 
-| Слой | Ресурсы | Жизнь |
+| layer | resources | lifetime |
 | --- | --- | --- |
-| **Персистентное** | S3 state bucket, ECR | живёт всегда (дёшево); защищено `prevent_destroy` |
-| **Эфемерное** | VPC, NAT, EKS, ArgoCD, RDS | apply в начале сессии → destroy в конце (дорого) |
+| **persistent** | S3 state bucket, ECR | always on (cheap); protected by `prevent_destroy` |
+| **ephemeral** | VPC, NAT, EKS, RDS and everything installed into the cluster | created at the start of a session, destroyed at the end (expensive) |
 
-## Ритуал сессии
+## Session ritual
 
 ```bash
-make up          # поднять стенд (~20 мин) + обновить kubeconfig
-# ... работа ...
-make down        # снести эфемерное; bucket и ECR остаются
-make status      # проверить, что снеслось
+make up          # create the stand (~20 min) and update kubeconfig
+make values      # copy the new secret ARN and database host into the gitops values;
+                 # the script prints the commit command — run it, or ArgoCD keeps the old ones
+# ... work ...
+make down        # tear down the ephemeral layer; the bucket and ECR stay
+make leftovers   # anything billable still in AWS; empty means clean
 ```
 
-Снос идёт **списком целей**, а не голым `terraform destroy`: последний упрётся в
-`prevent_destroy` на бакете состояния и ECR и не выполнится вовсе. Актуальный список
-эфемерных ресурсов живёт в `Makefile` — добавляя новый ресурс в этот слой, дополняй
-переменную `EPHEMERAL`, иначе он переживёт `make down` и продолжит стоить денег.
+`make down` asks for confirmation once, before doing anything, then:
+1. removes automated sync from every Application, so ArgoCD cannot recreate an Ingress;
+2. deletes `ExternalSecret` objects while the ESO controller is still alive to release
+   their finalizers;
+3. deletes Ingresses and waits for the load balancer to disappear. Terraform does not own
+   the ALB — the controller does, and it must clean up before it is destroyed;
+4. destroys the ephemeral layer by a target list (retried up to three times);
+5. runs `make leftovers`.
 
-`make snapshots` показывает финальные снимки RDS, оставшиеся от прошлых сессий: при
-`skip_final_snapshot = false` каждый снос оставляет по снимку, и они накапливаются.
+The teardown goes by an explicit target list, not a bare `terraform destroy`: the latter
+would stop at `prevent_destroy` on the state bucket and ECR. The list lives in the
+`Makefile` as `EPHEMERAL`. When adding a resource to the ephemeral layer, add it there, or
+it will survive `make down` and keep costing money.
+
+Other targets: `make status` (what is alive in the cloud), `make cost` (how long the stand
+has lived and what it cost), `make snapshots` (final RDS snapshots from past sessions —
+each teardown leaves one, and they accumulate), `make orphans` (delete ALBs and target
+groups left behind when the controller is already gone).
 
 ## Cost
 
-EKS CP $0.10/ч + 2× t3.small + NAT + RDS micro ≈ **$0.4–0.5 / сессия**.
-Персистентное (S3 state, ECR-образы, снимки) — копейки/мес.
+About **$0.23 per hour** with three `t3.small` nodes, the NAT gateway and a
+`db.t3.micro` RDS instance; the EKS control plane is the largest item. An ALB adds about
+$0.02 per hour. The persistent layer (S3 state, ECR images, the latest final snapshot)
+costs cents per month.
 
-## Решения
+## Decisions
 
-Обоснования вынесены в ADR: [CI→AWS auth](../docs/adr/14-ci-auth-masked-vars.md) ·
-[шифрование Secrets в EKS](../docs/adr/17-eks-secrets-encryption-off.md) ·
-[комплект защит RDS](../docs/adr/19-rds-safety-flags.md).
+The reasoning lives in the ADRs (in Russian for now):
+[CI → AWS auth](../docs/adr/14-ci-auth-masked-vars.md) ·
+[EKS Secrets encryption](../docs/adr/17-eks-secrets-encryption-off.md) ·
+[RDS protection flags](../docs/adr/19-rds-safety-flags.md).

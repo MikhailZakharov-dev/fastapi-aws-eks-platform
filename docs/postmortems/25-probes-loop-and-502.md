@@ -1,14 +1,14 @@
-# Пробы: петля рестартов здорового приложения и окно 502 при выкатке (тема 25)
+# Probes: a restart loop of a healthy application and a 502 window during rollout (theme 25)
 
-Два разных отказа с общим корнем: `Ready` — единственный сигнал, по которому в кластере
-принимаются три независимых решения, и оба раза этот сигнал был испорчен.
+Two different failures with a common root: `Ready` is the single signal on which three
+independent decisions are made in the cluster, and both times that signal was corrupted.
 
 ---
 
-## Отказ 1 — liveness убивает исправное приложение
+## Failure 1 — liveness kills a working application
 
-- **Symptom:** под перезапускается по кругу, `CrashLoopBackOff`, счётчик рестартов растёт.
-  В логах приложения при этом **ни одной ошибки**.
+- **Symptom:** the pod restarts in a loop, `CrashLoopBackOff`, the restart counter grows.
+  The application logs contain **not a single error**.
 
 - **Signal:**
 
@@ -23,56 +23,58 @@
   Normal   Killing    kubelet  Container app failed liveness probe, will be restarted
 
   $ kubectl -n dev logs talk-booking-85c445f748-pzlnv --previous
-  (штатный старт, ошибок нет)
+  (a normal startup, no errors)
   ```
 
-- **Cause:** приложению нужно несколько секунд, чтобы открыть порт: `lifespan` проверяет
-  соединение с базой до того, как сервер начнёт слушать. Liveness без прикрытия
-  startup-пробой опрашивает контейнер практически сразу после запуска и получает
-  `connection refused`. При `failureThreshold: 1` первый же отказ терминальный — kubelet
-  убивает контейнер, тот стартует заново и не доживает до открытия порта ни разу.
+- **Cause:** the application needs a few seconds to open its port: `lifespan` checks the
+  database connection before the server starts listening. A liveness probe without a
+  startup probe in front of it polls the container almost immediately after start and
+  gets `connection refused`. With `failureThreshold: 1` the first failure is terminal —
+  kubelet kills the container, it starts again, and never lives long enough to open the
+  port.
 
-  `connection refused` здесь важен как **класс сигнала**: это не истёкшее ожидание, а
-  мгновенный отказ ядра — на порту никто не слушает. `timeoutSeconds` в этом сценарии не
-  участвует вовсе, хотя выглядит как виновник.
+  `connection refused` matters here as a **signal class**: it is not an expired wait but
+  an instant refusal from the kernel — nobody is listening on the port. `timeoutSeconds`
+  plays no part in this scenario at all, although it looks like the culprit.
 
-- **Fix:** startup-проба берёт на себя весь период загрузки; у liveness нет
-  `initialDelaySeconds` и её пороги остаются жёсткими.
+- **Fix:** a startup probe covers the whole boot period; liveness has no
+  `initialDelaySeconds`, and its thresholds stay strict.
 
-- **Prevention:** чистый `logs --previous` при растущем `restartCount` — подпись
-  **внешнего убийцы**: приложение не падало, его остановили. Причина в этом случае всегда
-  в `describe` → Events, а не в логах.
+- **Prevention:** a clean `logs --previous` with a growing `restartCount` is the
+  signature of an **external killer**: the application did not crash, it was stopped. In
+  that case the cause is always in `describe` → Events, not in the logs.
 
-  Правило для настройки: `failureThreshold × periodSeconds` — это бюджет времени, а не
-  число попыток. Бюджет startup-пробы проверяется измерением, а не оценкой:
+  A rule for tuning: `failureThreshold × periodSeconds` is a time budget, not a number of
+  attempts. The startup probe budget is checked by measurement, not by estimate:
 
   ```
   kubectl -n dev get pod -l app=talk-booking -o jsonpath='{range .items[0].status.conditions[*]}{.type}{"  "}{.lastTransitionTime}{"\n"}{end}'
   ```
 
-  Разница между `Initialized` и `Ready` — реальное время старта. Здесь оно составило
-  7 секунд при заложенном бюджете 60.
+  The difference between `Initialized` and `Ready` is the real startup time. Here it was
+  7 seconds against a budget of 60.
 
 ---
 
-## Отказ 2 — выкатка без readiness отдаёт 502
+## Failure 2 — a rollout without readiness returns 502
 
-- **Symptom:** при каждой выкатке балансировщик несколько секунд отдаёт 5xx, потом само
-  проходит. В кластере при этом всё выглядит корректно.
+- **Symptom:** on every rollout the load balancer returns 5xx for a few seconds, then it
+  passes by itself. Everything in the cluster looks correct.
 
-- **Signal:** цикл `curl` через ALB раз в секунду во время выкатки:
+- **Signal:** a `curl` loop through the ALB, once per second, during a rollout:
 
   ```
   23:25:55 200
   23:25:56 502
-  23:26:02 000        <- сработал -m 5: запрос висел
+  23:26:02 000        <- -m 5 fired: the request hung
   23:26:03 200
   ```
 
-  Пропущенные секунды `23:25:57–23:26:01` — тоже сигнал: скрипт спит ровно секунду, значит
-  недостающие отметки означают запросы, которые висели. Окно отказа — около семи секунд.
+  The missing seconds `23:25:57–23:26:01` are a signal too: the script sleeps exactly
+  one second, so missing timestamps mean requests that hung. The failure window is about
+  seven seconds.
 
-  При этом `kubectl get pods -w` показывает безупречную работу контроллера Deployment:
+  Meanwhile `kubectl get pods -w` shows the Deployment controller working flawlessly:
 
   ```
   talk-booking-55f6786f54-l7mh4   0/1   Running       1s
@@ -80,30 +82,36 @@
   talk-booking-77774f5d7f-dh89k   1/1   Terminating   7m42s
   ```
 
-  Старый под убит **только после** того, как новый стал `Ready`.
+  The old pod is killed **only after** the new one becomes `Ready`.
 
-- **Cause:** `Ready` — одна величина, по которой независимо действуют трое: контроллер
-  Deployment решает, можно ли убивать старый под; endpoints-контроллер решает, лить ли
-  трафик; контроллер балансировщика через endpoints решает, регистрировать ли цель. Без
-  readiness-пробы kubelet выставляет `Ready` в момент запуска контейнера, и все трое
-  действуют на основании сигнала, который ничего не означает. Гарантия `maxUnavailable: 0`
-  формально соблюдена — контроллер честно дождался `Ready`.
+- **Cause:** `Ready` is one value on which three parties act independently:
+  - the Deployment controller decides whether the old pod may be killed;
+  - the endpoints controller decides whether to send traffic;
+  - the load balancer controller, through the endpoints, decides whether to register the
+    target.
 
-  Вторая половина причины — **два независимых мнения о здоровье**. Новый под уже `Ready`
-  для Kubernetes, но его цель в target group ещё в состоянии `initial`, а старая уже
-  ушла в `draining`. В этом промежутке у балансировщика нет ни одной цели, которой он
-  готов слать трафик, и 5xx отдаёт он сам, не дойдя до приложения.
+  Without a readiness probe kubelet sets `Ready` the moment the container starts, and all
+  three act on a signal that means nothing. The `maxUnavailable: 0` guarantee is formally
+  kept — the controller honestly waited for `Ready`.
 
-- **Fix:** readiness-проба на `/ready`, который проверяет соединение с базой; пороги
-  подобраны так, чтобы readiness срабатывала заметно раньше liveness — сначала снять
-  трафик, потом убивать. Обратный порядок означает обрыв соединений, в которые прямо
-  сейчас летят запросы.
+  The second half of the cause is **two independent opinions about health**. The new pod
+  is already `Ready` for Kubernetes, but its target in the target group is still
+  `initial`, while the old one has already gone to `draining`. In that gap the load
+  balancer has no target it is willing to send traffic to, and it returns the 5xx itself,
+  without reaching the application.
 
-- **Prevention:** ширина окна отказа **не зависит от нагрузки** — от неё зависит только
-  число пострадавших. Один запрос в секунду дал семь отказов; тысяча в секунду дала бы
-  семь тысяч за то же окно. Значит проверять выкатку нужно нагрузкой, а не глазами:
-  без живого цикла запросов это окно не наблюдаемо вовсе.
+- **Fix:** a readiness probe on `/ready`, which checks the database connection. Its
+  thresholds are set so readiness fires noticeably earlier than liveness — first take the
+  traffic away, then kill. The reverse order means cutting connections that requests are
+  flying into right now.
 
-  И разделение ответственности между пробами: liveness смотрит **только на себя** —
-  зависимость в ней превращает отказ базы в одновременный перезапуск всего флота.
-  Зависимости проверяет readiness, которая снимает трафик, но никого не убивает.
+- **Prevention:** the width of the failure window **does not depend on load** — only the
+  number of affected requests does. One request per second gave seven failures; a
+  thousand per second would give seven thousand in the same window. So a rollout has to
+  be checked under load, not by eye: without a live request loop the window is not
+  observable at all.
+
+  And the split of responsibility between probes: liveness looks **only at itself** — a
+  dependency in it turns a database outage into a simultaneous restart of the whole
+  fleet. Dependencies are checked by readiness, which takes traffic away but kills
+  nobody.

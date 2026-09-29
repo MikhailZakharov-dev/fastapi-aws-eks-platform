@@ -1,13 +1,13 @@
-# Однострочная правка, уничтожающая базу: `~` против `-/+`
+# A one-line change that destroys the database: `~` versus `-/+`
 
-- **Symptom:** две внешне одинаковые правки одного ресурса `aws_db_instance` дают
-  принципиально разный результат. Смена `identifier` — обновление на месте, база и
-  данные целы. Смена `availability_zone` — уничтожение и создание заново, данные
-  умирают. По виду конфига отличить нельзя.
+- **Symptom:** two edits of the same `aws_db_instance` that look alike give fundamentally
+  different results. Changing `identifier` is an in-place update: the database and its
+  data survive. Changing `availability_zone` destroys and recreates it: the data dies.
+  The configuration alone does not tell them apart.
 
-- **Signal:** `terraform plan` на базе с реальными данными.
+- **Signal:** `terraform plan` against a database with real data.
 
-  Переименование:
+  Rename:
   ```
   ~ resource "aws_db_instance" "app" {
       ~ identifier = "talk-booking" -> "talk-booking-db"
@@ -15,7 +15,7 @@
   Plan: 0 to add, 1 to change, 0 to destroy.
   ```
 
-  Смена зоны:
+  Zone change:
   ```
   -/+ resource "aws_db_instance" "app" {
       ~ availability_zone = "eu-central-1b" -> "eu-central-1a" # forces replacement
@@ -24,38 +24,39 @@
   Plan: 1 to add, 0 to change, 1 to destroy.
   ```
 
-- **Cause:** в схеме провайдера у каждого атрибута есть флаг `ForceNew`, отражающий,
-  умеет ли API облака менять это свойство у существующего объекта. У RDS
-  `availability_zone`, `storage_encrypted`, `kms_key_id`, `engine`, `timezone` и ещё
-  несколько помечены `ForceNew`; `identifier` — нет, потому что у AWS есть
-  `modify-db-instance --new-db-instance-identifier`. Интуиция здесь не работает:
-  «переименование» звучит опаснее «переезда в соседнюю зону», а на деле наоборот.
+- **Cause:** in the provider schema every attribute has a `ForceNew` flag, which reflects
+  whether the cloud API can change that property on an existing object. For RDS,
+  `availability_zone`, `storage_encrypted`, `kms_key_id`, `engine`, `timezone` and a few
+  more are `ForceNew`. `identifier` is not, because AWS has
+  `modify-db-instance --new-db-instance-identifier`. Intuition fails here: a "rename"
+  sounds riskier than "moving to the neighbouring zone", and in fact it is the other way
+  round.
 
-- **Что читать в plan (по убыванию надёжности):**
-  1. `# forces replacement` — стоит на самой виновной строке и называет причину;
-  2. ненулевое число в `N to destroy` — единственный показатель, который нужно
-     проверять перед подтверждением на stateful-ресурсе;
-  3. россыпь `(known after apply)` там, где раньше были конкретные значения: у нового
-     объекта все серверные атрибуты будут другими, поэтому их сотни уходят в неизвестность.
+- **What to read in the plan (most reliable first):**
+  1. `# forces replacement` — it sits on the guilty line itself and names the cause;
+  2. a non-zero number in `N to destroy` — the one figure you must check before
+     confirming anything on a stateful resource;
+  3. a scatter of `(known after apply)` where there used to be concrete values: a new
+     object gets all server-side attributes anew, so hundreds of them become unknown.
 
-- **Радиус поражения шире самой базы:** при пересоздании меняются `endpoint`,
-  `master_user_secret.secret_arn` и все выходные значения, на них завязанные. Ломаются
-  не только данные, но и потребители — в нашем случае ESO, который будет читать секрет
-  по ARN.
+- **The blast radius is wider than the database itself:** a replacement changes
+  `endpoint`, `master_user_secret.secret_arn` and every output built on them. Not only
+  the data breaks, but also the consumers — in our case ESO, which reads the secret by
+  its ARN.
 
 - **Fix / Prevention:**
-  - `storage_encrypted` и прочие `ForceNew`-атрибуты задавать **при создании**: позже
-    они меняются только через снимок → копию с шифрованием → восстановление;
-  - `lifecycle.prevent_destroy` не даёт плану собраться — но текст его же ошибки
-    называет обход (`-target`), то есть это лежачий полицейский против случайности,
-    а не барьер против намерения;
-  - `deletion_protection` работает на стороне AWS и потому ловит удаление в обход
-    Terraform — из консоли или CLI;
-  - финальный снимок ничего не запрещает, но оставляет точку восстановления.
+  - set `storage_encrypted` and other `ForceNew` attributes **at creation**: later they
+    can only be changed through a snapshot → an encrypted copy → a restore;
+  - `lifecycle.prevent_destroy` stops the plan from being built, but its own error
+    message names the bypass (`-target`). It is a speed bump against accidents, not a
+    barrier against intent;
+  - `deletion_protection` works on the AWS side, so it also catches deletion that
+    bypasses Terraform — from the console or the CLI;
+  - a final snapshot forbids nothing but leaves a restore point.
 
-- **Отдельно про окно восстановления:** `backup_retention_period` задаёт, как далеко
-  назад тянется окно (у нас 1 день — потолок free-plan аккаунта), а не свежесть точки
-  восстановления. Транзакционные логи уезжают примерно раз в 5 минут, поэтому RPO ≈ 5
-  минут, и внутри окна восстановиться можно на любой момент. При удалении инстанса
-  автоматические бэкапы удаляются вместе с ним (`delete_automated_backups = true` по
-  умолчанию) — переживает только финальный снимок.
+- **About the restore window:** `backup_retention_period` sets how far back the window
+  reaches (1 day for us — the ceiling of a free-plan account), not how fresh the restore
+  point is. Transaction logs are shipped about every 5 minutes, so RPO ≈ 5 minutes, and
+  within the window you can restore to any moment. When the instance is deleted, the
+  automated backups go with it (`delete_automated_backups = true` by default); only the
+  final snapshot survives.

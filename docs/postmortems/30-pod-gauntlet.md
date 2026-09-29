@@ -1,69 +1,73 @@
-# Под не поднимается: четыре статуса, четыре исполнителя (тема 30)
+# A pod that will not start: four statuses, four actors (theme 30)
 
-Четыре наведённых сбоя на одном стенде, одна реплика в `dev`. Главное, что они
-показали: **слово в колонке `STATUS` — не причина.** Это то, чем сейчас занят kubelet.
-Причину пишут разные компоненты в разные поля, и искать её надо там, куда пишет тот,
-кто остановил под.
+Four induced failures on one stand, one replica in `dev`. The main lesson: **the word in
+the `STATUS` column is not the cause.** It is what kubelet is busy with right now. The
+cause is written by different components into different fields, and you look for it
+where the component that stopped the pod writes.
 
-## Шпаргалка
+## Cheat sheet
 
-| статус | где остановился путь пода | кто остановил / сформировал код | решающее поле | команда |
+| status | where the pod's path stopped | who stopped it / formed the code | decisive field | command |
 |---|---|---|---|---|
-| `Pending` | ① назначение на ноду | scheduler | `Events` → `FailedScheduling` (что не подошло), `Conditions` → `PodScheduled False` | `describe pod` |
-| `ImagePullBackOff` | ② скачать образ | registry ответил «нет такого тега», kubelet записал | `Events` → `Failed to pull image … not found` | `describe pod` |
-| `CrashLoopBackOff`, `StartError`, код 128 | ③ старт процесса | runtime (runc): `exec` не удался, процесс приложения не стартовал | `Last State` → `Reason: StartError`, `Message`, `Started: 1970` (нулевое время) | `describe pod`; `logs --previous` пуст |
-| `CrashLoopBackOff`, `Error`, код 1 | после ③, процесс вышел сам | приложение | `Last State` → `Reason: Error`, `Exit Code` | `logs --previous` |
-| `OOMKilled` → `CrashLoopBackOff`, код 137 | ④ процесс работает | ядро: счётчик памяти cgroup перешёл `limits.memory` | `Last State` → `Reason: OOMKilled`; в `Events` события об убийстве **нет** | `describe pod` |
+| `Pending` | ① assignment to a node | scheduler | `Events` → `FailedScheduling` (what did not fit), `Conditions` → `PodScheduled False` | `describe pod` |
+| `ImagePullBackOff` | ② pulling the image | the registry answered "no such tag", kubelet recorded it | `Events` → `Failed to pull image … not found` | `describe pod` |
+| `CrashLoopBackOff`, `StartError`, code 128 | ③ starting the process | the runtime (runc): `exec` failed, the application process never started | `Last State` → `Reason: StartError`, `Message`, `Started: 1970` (zero time) | `describe pod`; `logs --previous` is empty |
+| `CrashLoopBackOff`, `Error`, code 1 | after ③, the process exited on its own | the application | `Last State` → `Reason: Error`, `Exit Code` | `logs --previous` |
+| `OOMKilled` → `CrashLoopBackOff`, code 137 | ④ the process is running | the kernel: the cgroup memory counter crossed `limits.memory` | `Last State` → `Reason: OOMKilled`; there is **no** kill event in `Events` | `describe pod` |
 
-Как читать:
+How to read it:
 
-- `State` — что с контейнером **сейчас** (часто просто ожидание перед повтором).
-  `Last State` — как закончился **предыдущий** запуск. Причину падения ищут во втором.
-- Код 137 = `128 + 9` (SIGKILL) бывает и от ядра по памяти, и от kubelet по истечении
-  `terminationGracePeriodSeconds` (тема 26). По коду их не различить — различает
-  `Reason`.
-- Код 127 формирует оболочка **внутри** контейнера (`sh -c nope`): процесс `sh`
-  стартовал, не нашёл команду и вышел сам. Тогда `Reason: Error`, нормальное время
-  старта и строка оболочки в `logs --previous`. Код 128 с `StartError` — это runtime,
-  до приложения дело не дошло.
-- Пауза между перезапусками растёт до 5 минут и дальше не увеличивается — отсюда
-  `RESTARTS (5m ago)` в `get pods -w`.
+- `State` is what the container is doing **now** (often just waiting before a retry).
+  `Last State` is how the **previous** run ended. Look for the cause of a crash in the
+  second one.
+- Code 137 = `128 + 9` (SIGKILL) comes both from the kernel on memory and from kubelet
+  when `terminationGracePeriodSeconds` runs out (theme 26). The code cannot tell them
+  apart — `Reason` can.
+- Code 127 is formed by the shell **inside** the container (`sh -c nope`): the `sh`
+  process started, did not find the command and exited on its own. Then it is
+  `Reason: Error`, a normal start time and the shell's line in `logs --previous`. Code 128
+  with `StartError` is the runtime; the application was never reached.
+- The pause between restarts grows up to 5 minutes and then stops growing — hence
+  `RESTARTS (5m ago)` in `get pods -w`.
 
-## Что видит мониторинг
+## What monitoring sees
 
-| акт | прошёл ① (есть IP)? | `up{…}` нового пода | загорелось |
+| act | passed ① (has an IP)? | `up{…}` of the new pod | fired |
 |---|---|---|---|
-| битый тег | да | `0` | `AppDown` |
-| OOM | да | `0` | `AppDown` |
-| `requests.cpu: 10` | **нет** | строки нет | **ничего** |
-| битая команда | да | `0` | `AppDown` |
+| broken tag | yes | `0` | `AppDown` |
+| OOM | yes | `0` | `AppDown` |
+| `requests.cpu: 10` | **no** | no series | **nothing** |
+| broken command | yes | `0` | `AppDown` |
 
-- Под получает IP при создании на ноде, то есть только после ①. Не-Ready адрес попадает
-  в EndpointSlice с `ready=false`, а Prometheus скрейпит и такие: readiness отрезает от
-  пода трафик, но не скрейп. Отсюда `up=0` и горящий `AppDown` в трёх актах.
-- В `Pending` у пода нет адреса, цели нет, строки `up` нет — `AppDown` молчит.
-  `AppTargetMissing` тоже молчит: `absent()` смотрит на весь селектор, а строка старого
-  пода с `up=1` на месте.
-- Во всех четырёх актах пользователь сбоя **не видел**: при одной реплике Deployment
-  не убирает старый под, пока новый не станет Ready. Значит `AppDown` в текущем виде
-  будит `critical` при полностью живом сервисе. Правильнее — `sum(up{…}) == 0`
-  (живых целей ноль), а застрявшую выкатку ловит встроенный `KubeDeploymentRolloutStuck`.
-  Не применено, решение открыто.
+- A pod gets its IP when it is created on a node, that is, only after ①. A non-Ready
+  address lands in the EndpointSlice with `ready=false`, and Prometheus scrapes those too:
+  readiness cuts the pod off from traffic, but not from scraping. Hence `up=0` and a
+  firing `AppDown` in three acts.
+- A `Pending` pod has no address, so there is no target, no `up` series, and `AppDown`
+  stays silent. `AppTargetMissing` is silent too: `absent()` looks at the whole selector,
+  and the old pod's series with `up=1` is still there.
+- In all four acts the user **did not see** the failure: with one replica, a Deployment
+  does not remove the old pod until the new one is Ready. So `AppDown` in its current form
+  pages `critical` while the service is fully alive. Better is `sum(up{…}) == 0` (zero
+  live targets), with the built-in `KubeDeploymentRolloutStuck` catching a stuck rollout.
+  Not applied; the decision is open.
 
-## Как ломали и что пошло не по плану
+## How it was broken and what did not go to plan
 
-- Первый заход акта «битый тег» через `values-dev` не дошёл до Deployment: тег общий у
-  приложения и у миграции, PreSync-хук упал первым, синк встал, старый ReplicaSet не
-  трогали, алерты зелёные. Акт переставлен на `kubectl set image` при снятой автоматике
-  root и `app-dev`. Ошибка сценария тьютора.
-- Незапланированный сбой на сносе: `helm_release.eso` — `context deadline exceeded`.
-  Удаление CRD ESO каскадом удалило `ExternalSecret`, их финализатор
-  `externalsecret-cleanup` снимает только контроллер ESO, а тот снесён тем же uninstall.
-  Объекты висели в `Terminating`. Исправлено в `make down` (`9b427bd`): `ExternalSecret`
-  удаляются до сноса, пока контроллер жив.
+- The first attempt at the "broken tag" act through `values-dev` never reached the
+  Deployment: the tag is shared by the application and the migration, the PreSync hook
+  failed first, the sync stalled, the old ReplicaSet was not touched, and the alerts were
+  green. The act was redone with `kubectl set image` with automated sync removed from
+  root and `app-dev`. A mistake in the tutor's scenario.
+- An unplanned failure during teardown: `helm_release.eso` — `context deadline exceeded`.
+  Deleting the ESO CRDs cascaded to the `ExternalSecret` objects; their
+  `externalsecret-cleanup` finalizer is removed only by the ESO controller, and that
+  controller was removed by the same uninstall. The objects hung in `Terminating`. Fixed
+  in `make down` (`9b427bd`): `ExternalSecret` objects are deleted before the teardown,
+  while the controller is still alive.
 
-## Что изменили в системе
+## What changed in the system
 
-- В чарте появился блок `resources` (`76997eb`), в `dev` — значения по замеру
-  (`ea16564`): `requests` 50m / 96Mi, `limits.memory` 192Mi, без лимита CPU. QoS класс
-  пода сменился с `BestEffort` на `Burstable`.
+- The chart got a `resources` block (`76997eb`); `dev` got values from measurement
+  (`ea16564`): `requests` 50m / 96Mi, `limits.memory` 192Mi, no CPU limit. The pod's QoS
+  class changed from `BestEffort` to `Burstable`.

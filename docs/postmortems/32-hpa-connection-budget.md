@@ -1,110 +1,116 @@
-# HPA добавил реплик, база начала отказывать (тема 32)
+# HPA added replicas, and the database started refusing (theme 32)
 
-Один наведённый сбой на стенде `dev`: пул 25 соединений на реплику без переполнения,
-HPA с потолком 4 реплики. Главное, что он показал: **HPA считает только CPU подов и
-ничего не знает о базе.** Каждая новая реплика приносит свой пул, и потолок реплик —
-это одновременно потолок соединений к Postgres. Если его не посчитать, лишние реплики
-не ускоряют сервис, а ломают его.
+One induced failure on the `dev` stand: a pool of 25 connections per replica with no
+overflow, HPA with a ceiling of 4 replicas. The main lesson: **HPA counts only the pods'
+CPU and knows nothing about the database.** Every new replica brings its own pool, so the
+replica ceiling is also a ceiling on connections to Postgres. If it is not calculated,
+extra replicas do not speed the service up — they break it.
 
-## Правило
+## The rule
 
 ```
-maxReplicas × (pool_size + max_overflow)  ≤  доступно подам
+maxReplicas × (pool_size + max_overflow)  ≤  available to pods
 ```
 
-«Доступно подам» — это не `max_connections`, а то, что остаётся после резервов и
-прочих клиентов. Замер на `dev` (db.t3.micro, PG16), 2026-09-27:
+"Available to pods" is not `max_connections`, but what remains after the reserves and the
+other clients. Measured on `dev` (db.t3.micro, PG16), 2026-09-27:
 
 ```
 81  max_connections = LEAST(DBInstanceClassMemory / 9531392, 5000)
-−3  superuser_reserved_connections   пустые слоты, только для суперпользователя
-−2  reserved_connections             пустые слоты, только для роли rds_reserved (с PG16)
-−3  rdsadmin                         заняты: служебный пользователь AWS
-−1  миграция (PreSync-хук)
-−1  psql при разборе
-= 71 подам;  4 × (5 + 10) = 60;  запас 11
+−3  superuser_reserved_connections   empty slots, superuser only
+−2  reserved_connections             empty slots, rds_reserved role only (since PG16)
+−3  rdsadmin                         occupied: the AWS service user
+−1  migration (PreSync hook)
+−1  psql during diagnosis
+= 71 for pods;  4 × (5 + 10) = 60;  margin 11
 ```
 
-Резервы — пустые слоты, которые пользователю `app` просто не выдадут. Заняты по-настоящему
-только соединения `rdsadmin`. Число записано рядом с `autoscaling` в `values-dev.yaml`.
+The reserves are empty slots that the `app` user will simply not be given. Only the
+`rdsadmin` connections are really occupied. The number is written next to `autoscaling`
+in `values-dev.yaml`.
 
-## Что было
+## What happened
 
-| что | ждали | увидели |
+| what | expected | observed |
 |---|---|---|
-| HPA под `hey -c150` | 1 → 4 за один шаг | 1 → 4 сразу: загрузка 1288 % при цели 70 %, формула хотела ⌈1 × 1288 / 70⌉ = 19, упёрлось в `maxReplicas` |
-| кто формирует отказ | база, 500 в логах приложения | так и есть, см. цепочку ниже |
-| соединения `app` в `pg_stat_activity` | упрутся в лимит | ≈ 72: 1 `active`, 66–68 `idle`, 3–5 `idle in transaction` |
-| клиент (`hey`, 5 минут) | заметная доля 500 | 297 810 × 200, 501 × 500 (**0.17 %**), p95 0.40 с, самый медленный 3.94 с |
-| алерты | `HighErrorRate`, возможно `SlowResponses` | **ни одного** |
+| HPA under `hey -c150` | 1 → 4 in one step | 1 → 4 at once: utilization 1288 % against a 70 % target; the formula wanted ⌈1 × 1288 / 70⌉ = 19 and hit `maxReplicas` |
+| who forms the refusal | the database, 500 in the application logs | exactly so, see the chain below |
+| `app` connections in `pg_stat_activity` | hit the limit | ≈ 72: 1 `active`, 66–68 `idle`, 3–5 `idle in transaction` |
+| client (`hey`, 5 minutes) | a noticeable share of 500s | 297 810 × 200, 501 × 500 (**0.17 %**), p95 0.40 s, slowest 3.94 s |
+| alerts | `HighErrorRate`, maybe `SlowResponses` | **none** |
 
-### Цепочка одного упавшего запроса
+### The chain of one failed request
 
 ```
-hey → uvicorn/FastAPI → пул SQLAlchemy: свои соединения заняты, пул < 25 → открыть новое
-    → psycopg → RDS :5432 → FATAL                                   ← отказ формирует БАЗА
+hey → uvicorn/FastAPI → SQLAlchemy pool: own connections busy, pool < 25 → open a new one
+    → psycopg → RDS :5432 → FATAL                                   ← the DATABASE forms the refusal
     → psycopg.OperationalError → sqlalchemy.exc.OperationalError
-    → эндпоинт не ловит → Starlette ServerErrorMiddleware → 500       ← код формирует ПРИЛОЖЕНИЕ
+    → the endpoint does not catch it → Starlette ServerErrorMiddleware → 500   ← the APPLICATION forms the code
 ```
 
-База отказывала тремя текстами — это три уровня занятости слотов:
+The database refused with three messages — three levels of slot exhaustion:
 
-- `sorry, too many clients already` — кончились все;
+- `sorry, too many clients already` — all slots are gone;
 - `remaining connection slots are reserved for roles with the SUPERUSER attribute`;
 - `remaining connection slots are reserved for roles with privileges of the "rds_reserved" role`.
 
-К каждому приклеена строка `no pg_hba.conf entry … no encryption`. Это не вторая
-проблема: libpq по умолчанию работает в `sslmode=prefer` и после отказа повторяет
-попытку без TLS, а RDS с `rds.force_ssl=1` пускает только по TLS. Причина — первое
-сообщение, второе — след повтора.
+Each one comes with a `no pg_hba.conf entry … no encryption` line. That is not a second
+problem: libpq runs in `sslmode=prefer` by default and retries without TLS after a
+refusal, while RDS with `rds.force_ssl=1` only accepts TLS. The cause is the first
+message; the second is a trace of the retry.
 
-### Почему отказов мало, а соединений много
+### Why so few refusals with so many connections
 
-- `idle` — соединение открыто и **занимает слот** в базе, просто по нему сейчас ничего
-  не выполняется. Для своего пода оно свободно, для чужого — нет: пулы у реплик
-  раздельные.
-- Постоянную часть пула (`pool_size`) SQLAlchemy не закрывает никогда. Каждая реплика
-  рвалась дорасти до 25: 4 × 25 = 100 при 71 доступных. Отказ получали только запросы,
-  которым понадобилось **новое** соединение, когда слоты уже кончились. Остальные шли
-  через открытые — отсюда 0.17 %.
-- После нагрузки соединения остаются висеть: бюджет занят и в покое.
-- `idle in transaction` — `Session` начала транзакцию и держит соединение до конца
-  запроса; `active` в снимке почти нет, потому что сам SQL занимает миллисекунды.
+- `idle` means the connection is open and **holds a slot** in the database; nothing is
+  running on it at the moment. It is free for its own pod, not for another one: each
+  replica has its own pool.
+- SQLAlchemy never closes the permanent part of the pool (`pool_size`). Every replica
+  tried to grow to 25: 4 × 25 = 100 against 71 available. Only requests that needed a
+  **new** connection after the slots ran out were refused. The rest went through
+  connections that were already open — hence 0.17 %.
+- After the load the connections stay open: the budget is taken even at rest.
+- `idle in transaction` means a `Session` started a transaction and holds the connection
+  until the end of the request. There is almost no `active` in a snapshot because the SQL
+  itself takes milliseconds.
 
-## Что видит мониторинг
+## What monitoring sees
 
-| правило | порог | было |
+| rule | threshold | observed |
 |---|---|---|
-| `HighErrorRate` | 5xx больше 5 % в течение 5 минут | 0.17 % |
-| `SlowResponses` | p95 больше 1 с в течение 10 минут | 0.40 с |
+| `HighErrorRate` | more than 5 % of 5xx for 5 minutes | 0.17 % |
+| `SlowResponses` | p95 above 1 s for 10 minutes | 0.40 s |
 
-По своим порогам мониторинг прав: пользователь почти не заметил сбоя. Но правило
-бюджета нарушено, а **ни один сигнал этого не видит** — число соединений против
-доступного никто не сравнивает. Поднять `maxReplicas` или пул в `values` можно
-незаметно, пока не пойдут 500. Нужна проверка на причину (например, `DatabaseConnections`
-RDS против 71), а не на симптом. **Не сделано, пробел открыт.**
+By its own thresholds the monitoring is right: the user barely noticed the failure. But
+the budget rule was broken, and **no signal sees that** — nobody compares the number of
+connections with what is available. Raising `maxReplicas` or the pool in `values` goes
+unnoticed until the 500s start. What is needed is a check on the cause (for example, RDS
+`DatabaseConnections` against 71), not on the symptom. **Not done; the gap is open.**
 
-## Как ломали и что пошло не по плану
+## How it was broken and what did not go to plan
 
-- HPA сначала не получал ни одной цифры: `v1beta1.metrics.k8s.io` висел в
-  `FailedDiscoveryCheck`. Аддон metrics-server слушает 10251, а модуль EKS этот порт
-  на группе нод не открывает, и пакеты от apiserver молча резались. Исправлено правилом
-  в `infra/eks.tf` (`4cd2359`).
-- Логи первого прогона пропали: после нагрузки HPA через 5 минут убрал лишние реплики,
-  а с подом уходят и его логи. Нагрузку повторили на 2 минуты, ошибки ловил цикл,
-  записывавший их в файл, пока поды живы.
-- В первом расчёте бюджета тьютор пропустил `reserved_connections = 2` и получил 73.
-  Всплыло по тексту ошибки `rds_reserved` на BREAK. Пересчитано: 71, потолок 4 по-прежнему
-  проходит.
+- At first HPA did not get a single number: `v1beta1.metrics.k8s.io` sat in
+  `FailedDiscoveryCheck`. The metrics-server add-on listens on 10251, the EKS module does
+  not open that port on the node group, and packets from the apiserver were dropped
+  silently. Fixed with a rule in `infra/eks.tf` (`4cd2359`).
+- The logs of the first run were lost: 5 minutes after the load HPA removed the extra
+  replicas, and a pod's logs go away with the pod. The load was repeated for 2 minutes,
+  and a loop caught the errors into a file while the pods were alive.
+- In the first budget calculation the tutor missed `reserved_connections = 2` and got 73.
+  It surfaced through the `rds_reserved` error text during the break. Recalculated: 71,
+  and the ceiling of 4 still fits.
 
-## Что изменили в системе
+## What changed in the system
 
-- metrics-server аддоном EKS (`06e85ca`), порт 10251 от control plane к нодам (`4cd2359`).
-- Приложение: размеры пула соединений читаются из окружения — `DB_POOL_SIZE`,
-  `DB_MAX_OVERFLOW`, `DB_POOL_TIMEOUT`, по умолчанию 5 / 10 / 30 (`06e85ca`).
-- Чарт: шаблон HPA (`autoscaling/v2`, цель по CPU от `requests`), пул из `values`
-  (gitops `eb68d48`). В `dev` HPA включён: 1–4 реплики, цель 70 % (`9daa3ce`).
-- `replicas` отдан HPA: в `app-dev` добавлены `ignoreDifferences` на `/spec/replicas` и
-  `RespectIgnoreDifferences=true`. Иначе ArgoCD с `selfHeal` возвращал бы число из git
-  и перетягивал поле у HPA. Решено заранее на разборе, драку не воспроизводили.
-- Сбой: пул 25 + 0 (`f959a14`), откат (`26cf192`). После отката соединений `app` — 3.
+- metrics-server as an EKS add-on (`06e85ca`), port 10251 open from the control plane to
+  the nodes (`4cd2359`).
+- Application: the connection pool sizes are read from the environment — `DB_POOL_SIZE`,
+  `DB_MAX_OVERFLOW`, `DB_POOL_TIMEOUT`, defaults 5 / 10 / 30 (`06e85ca`).
+- Chart: an HPA template (`autoscaling/v2`, CPU target relative to `requests`), the pool
+  from `values` (gitops `eb68d48`). In `dev` HPA is on: 1–4 replicas, target 70 %
+  (`9daa3ce`).
+- `replicas` is handed over to HPA: `app-dev` got `ignoreDifferences` on `/spec/replicas`
+  and `RespectIgnoreDifferences=true`. Otherwise ArgoCD with `selfHeal` would restore the
+  number from git and fight HPA over the field. Decided up front during the design step;
+  the fight itself was not reproduced.
+- The failure: pool 25 + 0 (`f959a14`), reverted (`26cf192`). After the revert there were
+  3 `app` connections.
